@@ -1,0 +1,8 @@
+log:
+  exp_name: 'cactus'
+guide:
+  text: 'a highly detailed cactus'
+optim:
+  iters: 10000
+render:
+  nerf_type: 'latent'

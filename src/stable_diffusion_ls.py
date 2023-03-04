@@ -2,7 +2,7 @@ from huggingface_hub import hf_hub_download
 from torchvision import transforms
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel,logging,CLIPProcessor
 from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
-
+# from src.new_unet_2d_condition import UNet2DConditionModel_MultiScale
 # suppress partial model loading warning
 logging.set_verbosity_error()
 
@@ -45,7 +45,7 @@ class StableDiffusion(nn.Module):
 
         # 3. The UNet model for generating the latents.
         self.unet = UNet2DConditionModel.from_pretrained(model_name, subfolder="unet", use_auth_token=self.token).to(self.device)
-
+        # self.unet = UNet2DConditionModel_MultiScale().to(device=self.device)
         # 4. Create a scheduler for inference
         self.scheduler = PNDMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=self.num_train_timesteps)
         self.alphas = self.scheduler.alphas_cumprod.to(self.device) # for convenience
@@ -128,20 +128,29 @@ class StableDiffusion(nn.Module):
         with torch.no_grad():
             # add noise
             noise = torch.randn_like(latents)
+            # noise_ls = torch.randn_like(torch.ones((latents.shape[0], latents.shape[1], latents.shape[2] // 2, latents.shape[3] // 2))).to(self.device)
             latents_noisy = self.scheduler.add_noise(latents, noise, t)
             # pred noise
             latent_model_input = torch.cat([latents_noisy] * 2)
-            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+            unet_output = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)
+        # noise_pred = unet_output[0]
+        # noise_pred_ls = unet_output[1]
         # torch.cuda.synchronize(); print(f'[TIME] guiding: unet {time.time() - _t:.4f}s')
-
+            noise_pred = unet_output
         # perform guidance (high scale from paper!)
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        # noise_pred_uncond_ls, noise_pred_text_ls = noise_pred_ls.chunk(2)
+        # noise_pred_ls = noise_pred_uncond_ls + guidance_scale * (noise_pred_text_ls - noise_pred_uncond_ls)
+
 
         # w(t), alpha_t * sigma_t^2
         # w = (1 - self.alphas[t])
         w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
         grad = w * (noise_pred - noise)
+
+        # grad_ls = w * (noise_pred_ls - noise_ls)
 
         # clip grad for stable training?
         # grad = grad.clamp(-1, 1)
@@ -149,6 +158,7 @@ class StableDiffusion(nn.Module):
         # manually backward, since we omitted an item in grad and cannot simply autodiff.
         # _t = time.time()
         latents.backward(gradient=grad, retain_graph=True)
+        # latents.backward(gradient=grad_ls, retain_graph=True)
         # torch.cuda.synchronize(); print(f'[TIME] guiding: backward {time.time() - _t:.4f}s')
 
         return 0 # dummy loss value
@@ -167,8 +177,8 @@ class StableDiffusion(nn.Module):
 
                 # predict the noise residual
                 with torch.no_grad():
-                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings)['sample']
-
+                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+                    #noise_pred = F.interpolate(noise_pred, (64, 64), mode='bilinear', align_corners=False)
                 # perform guidance
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -219,6 +229,7 @@ class StableDiffusion(nn.Module):
 
         return imgs
 
+
 def main():
     import argparse
     import matplotlib.pyplot as plt
@@ -239,11 +250,17 @@ def main():
 
     sd = StableDiffusion(device)
 
-    input = torch.ones((1, 4, 32, 32), device=device)
+    input = torch.ones((1, 4, 64, 64), device=device)
     t = torch.randint(20, 980 + 1, [1], dtype=torch.long, device=device)
     text_embeddings = torch.ones((2, 77, 768), device=device)
     loss = sd.train_step(text_embeddings, input)
 
+    # imgs = sd.prompt_to_img(prompt, H, W, steps)
+    # img = imgs[0]
+    # # visualize image
+    # plt.imshow(img)
+    # plt.savefig("cat1.jpg")
+    
 
 if __name__ == '__main__':
     main()

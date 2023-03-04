@@ -1,9 +1,6 @@
 import pyrallis
-
 from src.latent_nerf.configs.train_config import TrainConfig
 from src.latent_nerf.training.trainer import Trainer
-
-
 
 @pyrallis.wrap()
 def main(cfg: TrainConfig):

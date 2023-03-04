@@ -1,0 +1,8 @@
+log:
+  exp_name: 'flower'
+guide:
+  text: 'flower'
+optim:
+  iters: 10000
+render:
+  nerf_type: 'latent'

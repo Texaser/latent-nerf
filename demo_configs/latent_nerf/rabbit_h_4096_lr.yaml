@@ -1,0 +1,8 @@
+log:
+  exp_name: 'rabbit_h_4096_lr'
+guide:
+  text: 'a highly detailed rabbit'
+optim:
+  iters: 10000
+render:
+  nerf_type: 'latent'

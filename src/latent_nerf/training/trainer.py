@@ -1,4 +1,5 @@
 import sys
+# sys.path.append('/storage/hyi/projects/latent-nerf')
 from pathlib import Path
 from typing import Tuple, Any, Dict, Callable, Union, List
 
@@ -6,6 +7,7 @@ import imageio
 import numpy as np
 import pyrallis
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from loguru import logger
 from torch.optim import Optimizer
@@ -24,8 +26,8 @@ class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.train_step = 0
+        torch.cuda.set_device(0)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
         utils.seed_everything(self.cfg.optim.seed)
 
         # Make dirs
@@ -71,6 +73,7 @@ class Trainer:
                                           latent_mode=self.nerf.latent_mode)
         for p in diffusion_model.parameters():
             p.requires_grad = False
+        # diffusion_model.unet.requires_grad = True 
         return diffusion_model
 
     def calc_text_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
@@ -207,7 +210,6 @@ class Trainer:
 
         B, N = rays_o.shape[:2]
         H, W = data['H'], data['W']
-
         if self.cfg.optim.start_shading_iter is None or self.train_step < self.cfg.optim.start_shading_iter:
             shading = 'albedo'
             ambient_ratio = 1.0
@@ -219,6 +221,8 @@ class Trainer:
         outputs = self.nerf.render(rays_o, rays_d, staged=False, perturb=True, bg_color=bg_color,
                                    ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True)
         pred_rgb = outputs['image'].reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+        pred_rgb_lowscale = F.interpolate(pred_rgb, (H // 2, W // 2), mode='bilinear', align_corners=False)
+        # pred_rgb_lowscale = outputs['image'].reshape(B, H // 2, W // 2, -1).permute(0, 3, 1, 2).contiguous()
         pred_ws = outputs['weights_sum'].reshape(B, 1, H, W)
 
         # text embeddings
@@ -229,7 +233,10 @@ class Trainer:
             text_z = self.text_z
 
         # Guidance loss
+        # print("rgb shape", pred_rgb.shape)
+        # print("rgb-ls shape", pred_rgb_lowscale.shape)
         loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
+        loss_guidance += self.diffusion.train_step(text_z, pred_rgb_lowscale)
         loss = loss_guidance
 
         # Sparsity loss

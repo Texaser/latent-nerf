@@ -42,6 +42,7 @@ class NeRFNetwork(NeRFRenderer):
 
         if cfg.nerf_type == NeRFType.latent_tune:
             self.decoder_layer = nn.Linear(4, 3, bias=False)
+            #tanh / sigmoid
             init_decoder_layer(self.decoder_layer)
         else:
             self.decoder_layer = None
@@ -68,8 +69,12 @@ class NeRFNetwork(NeRFRenderer):
         if self.decoder_layer is not None:
             albedo = self.decoder_layer(albedo)
             albedo = (albedo + 1) / 2
+            # print("albedo, decoder_layer is not None", albedo)
         elif not self.latent_mode:
             albedo = torch.sigmoid(h[..., 1:])
+        # else:
+        #     albedo = torch.sigmoid(albedo)
+            # print("albedo, decoder_layer is None", albedo)
 
         return sigma, albedo
 

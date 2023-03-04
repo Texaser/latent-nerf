@@ -1,0 +1,8 @@
+log:
+  exp_name: 'tiger_h_4096_fb'
+guide:
+  text: 'a highly detailed tiger full body'
+optim:
+  iters: 10000
+render:
+  nerf_type: 'latent'

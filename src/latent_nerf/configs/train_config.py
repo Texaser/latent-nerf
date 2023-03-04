@@ -38,7 +38,7 @@ class OptimConfig:
     # Total iters
     iters: int = 5000
     # Learning rate
-    lr: float = 1e-3
+    lr: float = 5e-4
     # use amp mixed precision training
     fp16: bool = True
     # Start shading at this iteration
@@ -57,7 +57,7 @@ class LogConfig:
     # Experiment output dir
     exp_root: Path = Path('experiments/')
     # How many steps between save step
-    save_interval: int = 100
+    save_interval: int = 1000
     # Run only test
     eval_only: bool = False
     # Number of angles to sample for eval during training

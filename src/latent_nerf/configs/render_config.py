@@ -10,9 +10,9 @@ class RenderConfig:
     # Whether to use CUDA raymarching
     cuda_ray: bool = True
     # Maximal number of steps sampled per ray with cuda_ray
-    max_steps: int = 1024
+    max_steps: int = 4096
     # Number of steps sampled when rendering without cuda_ray
-    num_steps: int = 128
+    num_steps: int = 256
     # Number of upsampled steps per ray
     upsample_steps: int = 0
     # Iterations between updates of extra status
