@@ -377,7 +377,12 @@ class NeRFRenderer(nn.Module):
     def render(self, rays_o, rays_d, staged=False, max_ray_batch=4096, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # return: pred_rgb: [B, N, 3]
-
+        # staged: a boolean indicating whether to stage the computation for efficiency
+        #If staged is True and self.cuda_ray is False, the function sets up empty tensors 
+        # to store intermediate results for each batch. It then runs the rendering process 
+        # on batches of size max_ray_batch (which defaults to 4096), updating the intermediate tensors 
+        # as it goes. Once all batches have been computed, the function returns a dictionary containing 
+        # the computed depth, image, and weights_sum tensors.
         if self.cuda_ray:
             _run = self.run_cuda
         else:

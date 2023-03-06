@@ -1,0 +1,8 @@
+log:
+  exp_name: 'test'
+guide:
+  text: 'a highly detailed snake'
+optim:
+  iters: 10
+render:
+  nerf_type: 'latent'

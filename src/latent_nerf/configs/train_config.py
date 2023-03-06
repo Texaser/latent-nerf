@@ -38,7 +38,7 @@ class OptimConfig:
     # Total iters
     iters: int = 5000
     # Learning rate
-    lr: float = 5e-4
+    lr: float = 7.5e-4
     # use amp mixed precision training
     fp16: bool = True
     # Start shading at this iteration

@@ -21,12 +21,13 @@ from src.latent_nerf.training.nerf_dataset import NeRFDataset
 from src.stable_diffusion import StableDiffusion
 from src.utils import make_path, tensor2numpy
 
-
+from torch.utils.tensorboard import SummaryWriter
+log_writer = SummaryWriter()
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.train_step = 0
-        torch.cuda.set_device(0)
+        torch.cuda.set_device(2)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         utils.seed_everything(self.cfg.optim.seed)
 
@@ -143,7 +144,8 @@ class Trainer:
 
                 with torch.cuda.amp.autocast(enabled=self.cfg.optim.fp16):
                     pred_rgbs, pred_ws, loss = self.train_render(data)
-
+                
+                log_writer.add_scalar('Loss/train', float(loss), self.train_step)
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -214,16 +216,29 @@ class Trainer:
             shading = 'albedo'
             ambient_ratio = 1.0
         else:
-            shading = 'lambertian'
+            shading = 'textureless'
             ambient_ratio = 0.1
 
         bg_color = torch.rand((B * N, 3), device=rays_o.device)  # Will be used if bg_radius <= 0
         outputs = self.nerf.render(rays_o, rays_d, staged=False, perturb=True, bg_color=bg_color,
                                    ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True)
         pred_rgb = outputs['image'].reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-        pred_rgb_lowscale = F.interpolate(pred_rgb, (H // 2, W // 2), mode='bilinear', align_corners=False)
+        pred_rgb_half = F.interpolate(pred_rgb, (H // 2, W // 2), mode='bilinear', align_corners=False)
+        pred_rgb_quarter = F.interpolate(pred_rgb, (H // 4, W // 4), mode='bilinear', align_corners=False)
         # pred_rgb_lowscale = outputs['image'].reshape(B, H // 2, W // 2, -1).permute(0, 3, 1, 2).contiguous()
         pred_ws = outputs['weights_sum'].reshape(B, 1, H, W)
+
+        light_d = data['light_d'] if 'light_d' in data else None
+        shading = 'normal'
+        outputs_normals = self.nerf.render(rays_o, rays_d, staged=True, perturb=False, light_d=light_d,
+                                           ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True,
+                                           disable_background=True)
+        
+        # print("outputs_normal\n", outputs_normals.shape)
+
+        pred_normals = outputs_normals['image'].reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+
+
 
         # text embeddings
         if self.cfg.guide.append_direction:
@@ -236,9 +251,12 @@ class Trainer:
         # print("rgb shape", pred_rgb.shape)
         # print("rgb-ls shape", pred_rgb_lowscale.shape)
         loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
-        loss_guidance += self.diffusion.train_step(text_z, pred_rgb_lowscale)
+        #add multiscale loss
+        loss_guidance += self.diffusion.train_step(text_z, pred_rgb_half)
+        loss_guidance += self.diffusion.train_step(text_z, pred_rgb_quarter)
+        # add a guidance loss of pred_normal
+        loss_guidance += self.diffusion.train_step(text_z, pred_normals)
         loss = loss_guidance
-
         # Sparsity loss
         if 'sparsity_loss' in self.losses:
             loss += self.cfg.optim.lambda_sparsity * self.losses['sparsity_loss'](pred_ws)
