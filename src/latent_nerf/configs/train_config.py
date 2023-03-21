@@ -34,15 +34,15 @@ class OptimConfig:
     # Loss scale for mesh-guidance
     lambda_shape: float = 5e-6
     # Seed for experiment
-    seed: int = 0
+    seed: int = 3407
     # Total iters
     iters: int = 5000
     # Learning rate
-    lr: float = 7.5e-4
+    lr: float = 1e-3
     # use amp mixed precision training
     fp16: bool = True
     # Start shading at this iteration
-    start_shading_iter: Optional[int] = None
+    start_shading_iter: Optional[int] = 10000
     # Resume from checkpoint
     resume: bool = False
     # Load existing model
@@ -65,7 +65,7 @@ class LogConfig:
     # Number of angles to sample for eval after training
     full_eval_size: int = 100
     # Number of past checkpoints to keep
-    max_keep_ckpts: int = 2
+    max_keep_ckpts: int = 10
     # Skip decoding and vis only depth and normals
     skip_rgb: bool = False
 

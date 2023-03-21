@@ -18,11 +18,10 @@ class NeRFNetwork(NeRFRenderer):
                  ):
 
         super().__init__(cfg, latent_mode=cfg.nerf_type == NeRFType.latent)
-
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-        additional_dim_size = 1 if self.latent_mode else 0
-
+        # additional_dim_size = 1 if self.latent_mode else 0
+        additional_dim_size = 1
         self.encoder, self.in_dim = get_encoder('tiledgrid', input_dim=3, desired_resolution=2048 * self.bound)
 
         self.sigma_net = MLP(self.in_dim, 4 + additional_dim_size, hidden_dim, num_layers, bias=True)
@@ -126,7 +125,7 @@ class NeRFNetwork(NeRFRenderer):
             # lambertian shading
             # normal @ l?
             # lambertian = ratio + (1 - ratio) * (normal @ -l).clamp(min=0)  # [N,]
-            lambertian = ratio + (1 - ratio) * (normal @ l).clamp(min=0)  # [N,]
+            lambertian = ratio + (1 - ratio) * (normal @ -l).clamp(min=0)  # [N,]
             # print("l:\n", l)
             # print("sigma", sigma)
             # print("normal@l\n", normal@-l)
