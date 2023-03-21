@@ -24,9 +24,9 @@ class RenderConfig:
     # threshold for density grid to be occupied
     density_thresh: float = 10
     # Render width for training
-    train_w: int = 64
+    train_w: int = 32
     # Render height for training
-    train_h: int = 64
+    train_h: int = 32
     # Render width for inference
     eval_w: int = 128
     # Render height for inference

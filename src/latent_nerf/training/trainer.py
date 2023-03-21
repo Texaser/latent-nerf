@@ -18,8 +18,8 @@ from src import utils
 from src.latent_nerf.configs.train_config import TrainConfig
 from src.latent_nerf.models.renderer import NeRFRenderer
 from src.latent_nerf.training.nerf_dataset import NeRFDataset
-from src.stable_diffusion import StableDiffusion
-# from src.controlnet import StableDiffusion
+# from src.stable_diffusion import StableDiffusion
+from src.controlnet import StableDiffusion
 from src.utils import make_path, tensor2numpy
 
 from torch.utils.tensorboard import SummaryWriter
@@ -28,7 +28,7 @@ class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.train_step = 0
-        torch.cuda.set_device(1)
+        torch.cuda.set_device(4)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         utils.seed_everything(self.cfg.optim.seed)
         
@@ -87,8 +87,8 @@ class Trainer:
             #correlate with the angle of direction?
             for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
                 text = f"{ref_text}, {d} view"
-                text_z.append(self.diffusion.get_text_embeds([text]))
-                # text_z.append(text)
+                # text_z.append(self.diffusion.get_text_embeds([text]))
+                text_z.append(text)
         return text_z
 
     def init_optimizer(self) -> Tuple[Optimizer, Any]:
@@ -247,8 +247,8 @@ class Trainer:
 
         # print("outputs_normal\n", outputs_normals.shape)
 
-        # pred_normals = outputs_normals['image'][:, :, :3].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
-        # pred_normals = F.interpolate(pred_normals, (H * 8, W * 8), mode='bilinear', align_corners=False)
+        pred_normals = outputs_normals['image'][:, :, :3].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
+        pred_normals = F.interpolate(pred_normals, (H * 8, W * 8), mode='bilinear', align_corners=False)
         # text embeddings
         if self.cfg.guide.append_direction:
             dirs = data['dir']  # [B,]
@@ -262,8 +262,8 @@ class Trainer:
         # print("rgb shape\n", pred_rgb.shape)
         # print("text_z shape", text_z.shape)
         # print("rgb-ls shape", pred_rgb_lowscale.shape)
-        loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
-        # loss_guidance = self.diffusion.train_step(text_z, pred_rgb, pred_normals)
+        # loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
+        loss_guidance = self.diffusion.train_step(text_z, pred_rgb, pred_normals)
         
         # add multiscale loss
         # loss_guidance += self.diffusion.train_step(text_z, pred_rgb_half)

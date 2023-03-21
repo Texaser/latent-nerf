@@ -38,11 +38,11 @@ class OptimConfig:
     # Total iters
     iters: int = 5000
     # Learning rate
-    lr: float = 1e-3
+    lr: float = 1e-5
     # use amp mixed precision training
     fp16: bool = True
     # Start shading at this iteration
-    start_shading_iter: Optional[int] = 10000
+    start_shading_iter: Optional[int] = None
     # Resume from checkpoint
     resume: bool = False
     # Load existing model
