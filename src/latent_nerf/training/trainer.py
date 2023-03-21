@@ -19,6 +19,7 @@ from src.latent_nerf.configs.train_config import TrainConfig
 from src.latent_nerf.models.renderer import NeRFRenderer
 from src.latent_nerf.training.nerf_dataset import NeRFDataset
 from src.stable_diffusion import StableDiffusion
+# from src.controlnet import StableDiffusion
 from src.utils import make_path, tensor2numpy
 
 from torch.utils.tensorboard import SummaryWriter
@@ -27,10 +28,10 @@ class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.train_step = 0
-        torch.cuda.set_device(2)
+        torch.cuda.set_device(1)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         utils.seed_everything(self.cfg.optim.seed)
-
+        
         # Make dirs
         self.exp_path = make_path(self.cfg.log.exp_dir)
         self.ckpt_path = make_path(self.exp_path / 'checkpoints')
@@ -83,9 +84,11 @@ class Trainer:
             text_z = self.diffusion.get_text_embeds([ref_text])
         else:
             text_z = []
+            #correlate with the angle of direction?
             for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
                 text = f"{ref_text}, {d} view"
                 text_z.append(self.diffusion.get_text_embeds([text]))
+                # text_z.append(text)
         return text_z
 
     def init_optimizer(self) -> Tuple[Optimizer, Any]:
@@ -96,6 +99,8 @@ class Trainer:
     def init_dataloaders(self) -> Dict[str, DataLoader]:
         train_dataloader = NeRFDataset(self.cfg.render, device=self.device, type='train', H=self.cfg.render.train_h,
                                        W=self.cfg.render.train_w, size=100).dataloader()
+        train_ls_dataloader = NeRFDataset(self.cfg.render, device=self.device, type='train', H=self.cfg.render.train_h // 2,
+                                       W=self.cfg.render.train_w // 2, size=100).dataloader()
         val_loader = NeRFDataset(self.cfg.render, device=self.device, type='val', H=self.cfg.render.eval_h,
                                  W=self.cfg.render.eval_w,
                                  size=self.cfg.log.eval_size).dataloader()
@@ -103,7 +108,7 @@ class Trainer:
         val_large_loader = NeRFDataset(self.cfg.render, device=self.device, type='val', H=self.cfg.render.eval_h,
                                        W=self.cfg.render.eval_w,
                                        size=self.cfg.log.full_eval_size).dataloader()
-        dataloaders = {'train': train_dataloader, 'val': val_loader, 'val_large': val_large_loader}
+        dataloaders = {'train': train_dataloader, "train_ls": train_ls_dataloader, 'val': val_loader, 'val_large': val_large_loader}
         return dataloaders
 
     def init_losses(self) -> Dict[str, Callable]:
@@ -127,12 +132,12 @@ class Trainer:
         # Evaluate the initialization
         self.evaluate(self.dataloaders['val'], self.eval_renders_path)
         self.nerf.train()
-
+        
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
                     bar_format='{desc}: {percentage:3.0f}% training step {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
         while self.train_step < self.cfg.optim.iters:
             # Keep going over dataloader until finished the required number of iterations
-            for data in self.dataloaders['train']:
+            for data, data_ls in zip(self.dataloaders['train'], self.dataloaders['train_ls']):
                 if self.nerf.cuda_ray and self.train_step % self.cfg.render.update_extra_interval == 0:
                     with torch.cuda.amp.autocast(enabled=self.cfg.optim.fp16):
                         self.nerf.update_extra_state()
@@ -144,7 +149,8 @@ class Trainer:
 
                 with torch.cuda.amp.autocast(enabled=self.cfg.optim.fp16):
                     pred_rgbs, pred_ws, loss = self.train_render(data)
-                
+                    pred_rgbs_ls, pred_ws_ls, loss_ls = self.train_render(data_ls)
+                    loss += loss_ls
                 log_writer.add_scalar('Loss/train', float(loss), self.train_step)
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
@@ -216,46 +222,55 @@ class Trainer:
             shading = 'albedo'
             ambient_ratio = 1.0
         else:
-            shading = 'textureless'
+            shading = "lambertian"
+            # shading = 'textureless'
             ambient_ratio = 0.1
 
         bg_color = torch.rand((B * N, 3), device=rays_o.device)  # Will be used if bg_radius <= 0
         outputs = self.nerf.render(rays_o, rays_d, staged=False, perturb=True, bg_color=bg_color,
                                    ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True)
+        # print("output1", outputs)
         pred_rgb = outputs['image'].reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-        pred_rgb_half = F.interpolate(pred_rgb, (H // 2, W // 2), mode='bilinear', align_corners=False)
-        pred_rgb_quarter = F.interpolate(pred_rgb, (H // 4, W // 4), mode='bilinear', align_corners=False)
+        # pred_rgb_half = F.interpolate(pred_rgb, (H // 2, W // 2), mode='bilinear', align_corners=False)
+        # pred_rgb_quarter = F.interpolate(pred_rgb, (H // 4, W // 4), mode='bilinear', align_corners=False)
         # pred_rgb_lowscale = outputs['image'].reshape(B, H // 2, W // 2, -1).permute(0, 3, 1, 2).contiguous()
         pred_ws = outputs['weights_sum'].reshape(B, 1, H, W)
 
         light_d = data['light_d'] if 'light_d' in data else None
+
+
         shading = 'normal'
         outputs_normals = self.nerf.render(rays_o, rays_d, staged=True, perturb=False, light_d=light_d,
                                            ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True,
                                            disable_background=True)
-        
+        # print("output2", outputs_normals)
+
         # print("outputs_normal\n", outputs_normals.shape)
 
-        pred_normals = outputs_normals['image'].reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-
-
-
+        # pred_normals = outputs_normals['image'][:, :, :3].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
+        # pred_normals = F.interpolate(pred_normals, (H * 8, W * 8), mode='bilinear', align_corners=False)
         # text embeddings
         if self.cfg.guide.append_direction:
             dirs = data['dir']  # [B,]
             text_z = self.text_z[dirs]
+            # print("dirs", dirs)
+            # print("dirs_shape", dirs.shape)
         else:
             text_z = self.text_z
 
         # Guidance loss
-        # print("rgb shape", pred_rgb.shape)
+        # print("rgb shape\n", pred_rgb.shape)
+        # print("text_z shape", text_z.shape)
         # print("rgb-ls shape", pred_rgb_lowscale.shape)
         loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
-        #add multiscale loss
-        loss_guidance += self.diffusion.train_step(text_z, pred_rgb_half)
-        loss_guidance += self.diffusion.train_step(text_z, pred_rgb_quarter)
+        # loss_guidance = self.diffusion.train_step(text_z, pred_rgb, pred_normals)
+        
+        # add multiscale loss
+        # loss_guidance += self.diffusion.train_step(text_z, pred_rgb_half)
+        # loss_guidance += self.diffusion.train_step(text_z, pred_rgb_quarter)
         # add a guidance loss of pred_normal
-        loss_guidance += self.diffusion.train_step(text_z, pred_normals)
+        # loss_guidance += self.diffusion.train_step(text_z, pred_normals)
+        # print("outputs.requires_grad", outputs.requires_grad)
         loss = loss_guidance
         # Sparsity loss
         if 'sparsity_loss' in self.losses:
@@ -287,6 +302,7 @@ class Trainer:
                                    ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True, bg_color=bg_color)
 
         pred_depth = outputs['depth'].reshape(B, H, W)
+        # print("depth shape", pred_depth.shape)
         if self.nerf.latent_mode:
             pred_latent = outputs['image'].reshape(B, H, W, 3 + 1).permute(0, 3, 1, 2).contiguous()
             if self.cfg.log.skip_rgb:
@@ -296,6 +312,10 @@ class Trainer:
                 pred_rgb = self.diffusion.decode_latents(pred_latent).permute(0, 2, 3, 1).contiguous()
         else:
             pred_rgb = outputs['image'].reshape(B, H, W, 3).contiguous().clamp(0, 1)
+            # pred_rgb = outputs['image'].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous().clamp(0, 1)
+            # pred_rgb = F.interpolate(pred_rgb, (H * 8, W * 8), mode='bilinear', align_corners=False).permute(0, 2, 3, 1).contiguous()
+           
+
 
         pred_depth = pred_depth.unsqueeze(-1).repeat(1, 1, 1, 3)
 
@@ -315,6 +335,8 @@ class Trainer:
         else:
             pred_rgb_vis = pred_rgbs.permute(0, 2, 3,
                                              1).contiguous().clamp(0, 1)  #
+            # H, W = pred_rgbs.shape[2], pred_rgbs.shape[3]
+            # pred_rgb_vis = F.interpolate(pred_rgbs, (H * 8, W * 8), mode='bilinear', align_corners=False).permute(0, 2, 3, 1).contiguous().clamp(0, 1)
         save_path = self.train_renders_path / f'step_{self.train_step:05d}.jpg'
         save_path.parent.mkdir(exist_ok=True)
 

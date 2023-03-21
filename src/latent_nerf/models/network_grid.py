@@ -124,8 +124,12 @@ class NeRFNetwork(NeRFRenderer):
             normal[torch.isnan(normal)] = 0
 
             # lambertian shading
-            lambertian = ratio + (1 - ratio) * (normal @ -l).clamp(min=0)  # [N,]
-
+            # normal @ l?
+            # lambertian = ratio + (1 - ratio) * (normal @ -l).clamp(min=0)  # [N,]
+            lambertian = ratio + (1 - ratio) * (normal @ l).clamp(min=0)  # [N,]
+            # print("l:\n", l)
+            # print("sigma", sigma)
+            # print("normal@l\n", normal@-l)
             if shading == 'textureless':
                 color = lambertian.unsqueeze(-1).repeat(1, 3)
             elif shading == 'normal':

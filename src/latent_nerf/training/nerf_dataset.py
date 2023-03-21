@@ -172,7 +172,6 @@ class NeRFDataset:
 
         # sample a low-resolution but full image for CLIP
         rays = get_rays(poses, intrinsics, self.H, self.W, -1)
-
         data = {
             'H': self.H,
             'W': self.W,
