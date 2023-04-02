@@ -28,7 +28,7 @@ class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.train_step = 0
-        torch.cuda.set_device(4)
+        torch.cuda.set_device(5)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         utils.seed_everything(self.cfg.optim.seed)
         
@@ -161,7 +161,7 @@ class Trainer:
                     self.evaluate(self.dataloaders['val'], self.eval_renders_path)
                     self.nerf.train()
 
-                if np.random.uniform(0, 1) < 0.05:
+                if np.random.uniform(0, 1) < 0.03:
                     # Randomly log rendered images throughout the training
                     self.log_train_renders(pred_rgbs)
         logger.info('Finished Training ^_^')
@@ -236,34 +236,30 @@ class Trainer:
         # pred_rgb_lowscale = outputs['image'].reshape(B, H // 2, W // 2, -1).permute(0, 3, 1, 2).contiguous()
         pred_ws = outputs['weights_sum'].reshape(B, 1, H, W)
 
-        light_d = data['light_d'] if 'light_d' in data else None
-
-
-        shading = 'normal'
-        outputs_normals = self.nerf.render(rays_o, rays_d, staged=True, perturb=False, light_d=light_d,
-                                           ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True,
-                                           disable_background=True)
-        # print("output2", outputs_normals)
-
-        # print("outputs_normal\n", outputs_normals.shape)
-
-        pred_normals = outputs_normals['image'][:, :, :3].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
-        pred_normals = F.interpolate(pred_normals, (H * 8, W * 8), mode='bilinear', align_corners=False)
+        # normal
+        # shading = 'normal'
+        # light_d = data['light_d'] if 'light_d' in data else None
+        # outputs_normals = self.nerf.render(rays_o, rays_d, staged=True, perturb=False, light_d=light_d,
+        #                                    ambient_ratio=ambient_ratio, shading=shading, force_all_rays=True,
+        #                                    disable_background=True)
+        # pred_normals = outputs_normals['image'][:, :, :3].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
+        # pred_normals = F.interpolate(pred_normals, (H * 8, W * 8), mode='bilinear', align_corners=False)
+        
+        # depth
+        pred_depth = outputs['depth'].reshape(B, 1, H, W)
+        # pred_depth = F.interpolate(pred_depth, (H * 8, W * 8), mode='bilinear', align_corners=False)
+        
+        
         # text embeddings
         if self.cfg.guide.append_direction:
             dirs = data['dir']  # [B,]
             text_z = self.text_z[dirs]
-            # print("dirs", dirs)
-            # print("dirs_shape", dirs.shape)
         else:
             text_z = self.text_z
 
         # Guidance loss
-        # print("rgb shape\n", pred_rgb.shape)
-        # print("text_z shape", text_z.shape)
-        # print("rgb-ls shape", pred_rgb_lowscale.shape)
         # loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
-        loss_guidance = self.diffusion.train_step(text_z, pred_rgb, pred_normals)
+        loss_guidance = self.diffusion.train_step(text_z, pred_rgb, pred_depth)
         
         # add multiscale loss
         # loss_guidance += self.diffusion.train_step(text_z, pred_rgb_half)
@@ -330,6 +326,7 @@ class Trainer:
 
     def log_train_renders(self, pred_rgbs: torch.Tensor):
         if self.nerf.latent_mode:
+            # if shading == "textureless" not passing decoder
             pred_rgb_vis = self.diffusion.decode_latents(pred_rgbs).permute(0, 2, 3,
                                                                             1).contiguous()  # [1, 3, H, W]
         else:

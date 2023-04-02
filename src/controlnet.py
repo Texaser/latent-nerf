@@ -8,16 +8,18 @@ sys.path.append('/storage/hyi/projects/latent-nerf/src')
 sys.path.append('/storage/hyi/projects/latent-nerf/src/latent_nerf')
 # suppress partial model loading warning
 logging.set_verbosity_error()
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import cv2
 from loguru import logger
 import os
 import time
 from omegaconf import OmegaConf
 import einops
 from cldm.model import create_model, load_state_dict
+from annotator.midas import MidasDetector
 from ldm.modules.diffusionmodules.util import (
     conv_nd,
     linear,
@@ -58,7 +60,7 @@ class StableDiffusion(nn.Module):
 
         # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
         self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-        # self.text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        self.text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
         self.image_encoder = None
         self.image_processor = None
 
@@ -66,9 +68,9 @@ class StableDiffusion(nn.Module):
         # 3. The UNet model for generating the latents.
         # self.unet = UNet2DConditionModel.from_pretrained(model_name, subfolder="unet", use_auth_token=self.token).to(self.device)
         self.controlnet = create_model('./src/latent_nerf/models/cldm_v15.yaml').cpu()
-        self.controlnet.load_state_dict(load_state_dict('./src/latent_nerf/models/control_sd15_normal.pth', location='cuda'))
+        self.controlnet.load_state_dict(load_state_dict('./src/latent_nerf/models/control_sd15_depth.pth', location='cuda'))
         self.controlnet = self.controlnet.to(self.device)
-        
+        self.detector = MidasDetector()
         # 4. Create a scheduler for inference
         self.scheduler = PNDMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=self.num_train_timesteps)
         self.alphas = self.scheduler.alphas_cumprod.to(self.device) # for convenience
@@ -107,7 +109,7 @@ class StableDiffusion(nn.Module):
         # get the id for the token and assign the embeds
         token_id = self.tokenizer.convert_tokens_to_ids(token)
         self.text_encoder.get_input_embeddings().weight.data[token_id] = embeds
-
+       
     def get_text_embeds(self, prompt):
         # Tokenize text and get embeddings
         text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length, truncation=True, return_tensors='pt')
@@ -126,11 +128,11 @@ class StableDiffusion(nn.Module):
         return text_embeddings
 
 
-    def train_step(self, text_embeddings, inputs, control, guidance_scale=100, unconditional_guidance_scale=9):
+    def train_step(self, text_embeddings, inputs, additional_inputs, guidance_scale=100, unconditional_guidance_scale=100, detect_resolution=384):
         
-        prompt = text_embeddings
         # interp to 512x512 to be fed into vae.
         # _t = time.time()
+        B, C, H, W = additional_inputs.shape
         if not self.latent_mode:
         # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
             pred_rgb_512 = F.interpolate(inputs, (512, 512), mode='bilinear', align_corners=False)
@@ -138,6 +140,22 @@ class StableDiffusion(nn.Module):
         else:
             latents = inputs
         # torch.cuda.synchronize(); print(f'[TIME] guiding: interp {time.time() - _t:.4f}s')
+
+        additional_inputs = self.HWC_convert(additional_inputs)
+        x, _ = self.detector(self.resize_image(additional_inputs, detect_resolution))
+        x = x[:, :, None]
+        detected_map = np.concatenate([x, x, x], axis=2)
+
+        detected_map = cv2.resize(detected_map, (W * 8, H * 8), interpolation=cv2.INTER_LINEAR)
+
+        control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
+        control = torch.stack([control for _ in range(1)], dim=0)
+        control = control.permute(0, 3, 1, 2).contiguous()
+
+
+
+
+
 
         # timestep ~ U(0.02, 0.98) to avoid very high/low noise level
         t = torch.randint(self.min_step, self.max_step + 1, [1], dtype=torch.long, device=self.device)
@@ -147,15 +165,19 @@ class StableDiffusion(nn.Module):
         a_prompt = 'best quality, extremely detailed'
         n_prompt = 'longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit,' \
                             ' fewer digits, cropped, worst quality, low quality'
+        # n_prompt = ' ' * len(prompt + ', ' + a_prompt)
         # torch.cuda.synchronize(); print(f'[TIME] guiding: vae enc {time.time() - _t:.4f}s')
         
-        #embedding
+        # embedding
+        # prompt_uncond, prompt_cond = text_embeddings.chunk(2)
+        # cond = {"c_concat": [control], "c_crossattn": [prompt_cond]}
+        # un_cond = {"c_concat":  [control], "c_crossattn": [prompt_uncond]}
+        prompt = text_embeddings
         cond = {"c_concat": [control], "c_crossattn": [self.controlnet.get_learned_conditioning([prompt + ', ' + a_prompt] * 1)]}
         un_cond = {"c_concat":  [control], "c_crossattn": [self.controlnet.get_learned_conditioning([n_prompt] * 1)]}
         guess_mode = None
         strength = 1
         self.controlnet.control_scales = [strength * (0.825 ** float(12 - i)) for i in range(13)] if guess_mode else ([strength] * 13)
-
         # predict the noise residual with unet, NO grad!
         # _t = time.time()
 
@@ -177,13 +199,18 @@ class StableDiffusion(nn.Module):
         # noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         # noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
         
+        # convert to (0, 255)
+
+
         with torch.no_grad():
             noise = torch.randn_like(latents)
             latents_noisy = self.scheduler.add_noise(latents, noise, t)
             model_t = self.controlnet.apply_model(latents_noisy, t, cond)
             model_uncond = self.controlnet.apply_model(latents_noisy, t, un_cond)
             noise_pred = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
-
+            # print(noise_pred)
+            # print(noise)
+            # exit(0)
         # w(t), alpha_t * sigma_t^2
         # w = (1 - self.alphas[t])
         w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
@@ -264,6 +291,38 @@ class StableDiffusion(nn.Module):
         imgs = (imgs * 255).round().astype('uint8')
 
         return imgs
+    
+    def HWC_convert(self, x):
+        # x = (x.numpy() * 255).astype(np.uint8)
+        B, C, H, W = x.shape
+        assert C == 1 or C == 3 or C == 4
+        if C == 3:
+            return x
+        if C == 1:
+            # return np.concatenate([x, x, x], axis=1)
+            x = x * 255
+            x = torch.cat([x, x, x], axis=1).permute(0, 2, 3, 1).contiguous().squeeze()
+            x = x.detach().cpu().numpy().astype(np.uint8)
+            return x
+        if C == 4:
+            x = x.to(torch.float32) * 255
+            color = x[:, 0:3, :, :].to(torch.float32)
+            alpha = x[:, 3:4, :, :].to(torch.float32) / 255.0
+            y = color * alpha + 255.0 * (1.0 - alpha)
+            y = y.clip(0, 255).to(torch.float32)
+            return y / 255.0
+        
+    def resize_image(self, input_image, resolution):
+        H, W, C = input_image.shape
+        H = float(H)
+        W = float(W)
+        k = float(resolution) / min(H, W)
+        H *= k
+        W *= k
+        H = int(np.round(H / 64.0)) * 64
+        W = int(np.round(W / 64.0)) * 64
+        img = cv2.resize(input_image, (W, H), interpolation=cv2.INTER_LANCZOS4 if k > 1 else cv2.INTER_AREA)
+        return img
     
 
 def main():
