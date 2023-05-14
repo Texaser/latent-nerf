@@ -18,8 +18,8 @@ from src import utils
 from src.latent_nerf.configs.train_config import TrainConfig
 from src.latent_nerf.models.renderer import NeRFRenderer
 from src.latent_nerf.training.nerf_dataset import NeRFDataset
-# from src.stable_diffusion import StableDiffusion
-from src.controlnet import StableDiffusion
+from src.stable_diffusion import StableDiffusion
+# from src.controlnet import StableDiffusion
 from src.utils import make_path, tensor2numpy
 
 from torch.utils.tensorboard import SummaryWriter
@@ -28,7 +28,7 @@ class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.train_step = 0
-        torch.cuda.set_device(5)
+        torch.cuda.set_device(1)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         utils.seed_everything(self.cfg.optim.seed)
         
@@ -75,7 +75,7 @@ class Trainer:
                                           latent_mode=self.nerf.latent_mode)
         for p in diffusion_model.parameters():
             p.requires_grad = False
-        # diffusion_model.unet.requires_grad = True 
+        
         return diffusion_model
 
     def calc_text_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
@@ -86,13 +86,15 @@ class Trainer:
             text_z = []
             #correlate with the angle of direction?
             for d in ['front', 'side', 'back', 'side', 'overhead', 'bottom']:
-                text = f"{ref_text}, {d} view"
-                # text_z.append(self.diffusion.get_text_embeds([text]))
-                text_z.append(text)
+                text = f"{ref_text}, {d} view, {d} view"
+                text_z.append(self.diffusion.get_text_embeds([text]))
+                # text_z.append(text)
+                # repeat back view
         return text_z
 
     def init_optimizer(self) -> Tuple[Optimizer, Any]:
-        optimizer = torch.optim.Adam(self.nerf.get_params(self.cfg.optim.lr), betas=(0.9, 0.99), eps=1e-15)
+        #finetune controlnet
+        optimizer = torch.optim.Adam(self.nerf.get_params(self.cfg.optim.lr), betas=(0.9, 0.99), eps=1e-15, amsgrad=True, weight_decay=1e-7)
         scaler = torch.cuda.amp.GradScaler(enabled=self.cfg.optim.fp16)
         return optimizer, scaler
 
@@ -109,6 +111,7 @@ class Trainer:
                                        W=self.cfg.render.eval_w,
                                        size=self.cfg.log.full_eval_size).dataloader()
         dataloaders = {'train': train_dataloader, "train_ls": train_ls_dataloader, 'val': val_loader, 'val_large': val_large_loader}
+        # dataloaders = {'train': train_dataloader, 'val': val_loader, 'val_large': val_large_loader}
         return dataloaders
 
     def init_losses(self) -> Dict[str, Callable]:
@@ -133,15 +136,26 @@ class Trainer:
         self.evaluate(self.dataloaders['val'], self.eval_renders_path)
         self.nerf.train()
         
+        # Add warm-up phase
+        warmup_iters = int(self.cfg.optim.iters * 0.1)
+        warmup_lr_schedule = [[] for _ in range(len(self.optimizer.param_groups))]
+        for i in range(len(self.optimizer.param_groups)):
+            warmup_lr_schedule[i] = np.linspace(self.optimizer.param_groups[i]['lr'] * 0.1, self.optimizer.param_groups[i]['lr'], warmup_iters)
+
+
         pbar = tqdm(total=self.cfg.optim.iters, initial=self.train_step,
                     bar_format='{desc}: {percentage:3.0f}% training step {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
         while self.train_step < self.cfg.optim.iters:
             # Keep going over dataloader until finished the required number of iterations
             for data, data_ls in zip(self.dataloaders['train'], self.dataloaders['train_ls']):
+            # for data in self.dataloaders['train']:
                 if self.nerf.cuda_ray and self.train_step % self.cfg.render.update_extra_interval == 0:
                     with torch.cuda.amp.autocast(enabled=self.cfg.optim.fp16):
                         self.nerf.update_extra_state()
 
+                if self.train_step < warmup_iters:
+                    for i in range(len(self.optimizer.param_groups)):
+                        self.optimizer.param_groups[i]['lr'] = warmup_lr_schedule[i][self.train_step]
                 self.train_step += 1
                 pbar.update(1)
 
@@ -155,13 +169,13 @@ class Trainer:
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-
+                
                 if self.train_step % self.cfg.log.save_interval == 0:
                     self.save_checkpoint(full=True)
                     self.evaluate(self.dataloaders['val'], self.eval_renders_path)
                     self.nerf.train()
 
-                if np.random.uniform(0, 1) < 0.03:
+                if np.random.uniform(0, 1) < 0.01:
                     # Randomly log rendered images throughout the training
                     self.log_train_renders(pred_rgbs)
         logger.info('Finished Training ^_^')
@@ -222,8 +236,8 @@ class Trainer:
             shading = 'albedo'
             ambient_ratio = 1.0
         else:
-            shading = "lambertian"
-            # shading = 'textureless'
+            # shading = "lambertian"
+            shading = 'textureless'
             ambient_ratio = 0.1
 
         bg_color = torch.rand((B * N, 3), device=rays_o.device)  # Will be used if bg_radius <= 0
@@ -258,8 +272,9 @@ class Trainer:
             text_z = self.text_z
 
         # Guidance loss
-        # loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
-        loss_guidance = self.diffusion.train_step(text_z, pred_rgb, pred_depth)
+        loss_guidance = self.diffusion.train_step(text_z, pred_rgb)
+        # additional_inputs = pred_depth
+        # loss_guidance = self.diffusion.train_step(text_z, pred_rgb, additional_inputs)
         
         # add multiscale loss
         # loss_guidance += self.diffusion.train_step(text_z, pred_rgb_half)
@@ -268,6 +283,23 @@ class Trainer:
         # loss_guidance += self.diffusion.train_step(text_z, pred_normals)
         # print("outputs.requires_grad", outputs.requires_grad)
         loss = loss_guidance
+
+        # # Clip loss
+        # print(loss)
+        if self.nerf.latent_mode:
+            img = self.diffusion.decode_latents(pred_rgb).permute(0, 2, 3, 1).contiguous()
+            img = img[0] * 255
+        else:
+            img = pred_rgb[0] * 255
+        img = img.to(torch.uint8)
+        dir_list = ['front', 'side', 'back', 'side', 'overhead', 'bottom']
+        dir = dir_list[dirs]
+        text = f"{self.cfg.guide.text}, {dir} view, {dir} view"
+        inputs = self.diffusion.processor(text=text, images=img, return_tensors="pt", padding=True).to(self.device)
+        clip_loss = (1 / self.diffusion.clip(**inputs)[0][0][0])
+
+        # print(clip_loss)
+        loss += self.cfg.optim.clip_scale * clip_loss
         # Sparsity loss
         if 'sparsity_loss' in self.losses:
             loss += self.cfg.optim.lambda_sparsity * self.losses['sparsity_loss'](pred_ws)

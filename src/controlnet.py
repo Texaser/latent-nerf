@@ -1,6 +1,6 @@
 from huggingface_hub import hf_hub_download
 from torchvision import transforms
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel,logging,CLIPProcessor
+from transformers import CLIPModel, CLIPTextModel, CLIPTokenizer, CLIPVisionModel, logging, CLIPProcessor
 from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
 
 import sys
@@ -61,6 +61,8 @@ class StableDiffusion(nn.Module):
         # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
         self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
         self.text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        self.clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         self.image_encoder = None
         self.image_processor = None
 
@@ -135,24 +137,11 @@ class StableDiffusion(nn.Module):
         B, C, H, W = additional_inputs.shape
         if not self.latent_mode:
         # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
-            pred_rgb_512 = F.interpolate(inputs, (512, 512), mode='bilinear', align_corners=False)
+            pred_rgb_512 = F.interpolate(inputs, (H * 8, W * 8), mode='bilinear', align_corners=False)
             latents = self.encode_imgs(pred_rgb_512)
         else:
             latents = inputs
         # torch.cuda.synchronize(); print(f'[TIME] guiding: interp {time.time() - _t:.4f}s')
-
-        additional_inputs = self.HWC_convert(additional_inputs)
-        x, _ = self.detector(self.resize_image(additional_inputs, detect_resolution))
-        x = x[:, :, None]
-        detected_map = np.concatenate([x, x, x], axis=2)
-
-        detected_map = cv2.resize(detected_map, (W * 8, H * 8), interpolation=cv2.INTER_LINEAR)
-
-        control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
-        control = torch.stack([control for _ in range(1)], dim=0)
-        control = control.permute(0, 3, 1, 2).contiguous()
-
-
 
 
 
@@ -172,6 +161,22 @@ class StableDiffusion(nn.Module):
         # prompt_uncond, prompt_cond = text_embeddings.chunk(2)
         # cond = {"c_concat": [control], "c_crossattn": [prompt_cond]}
         # un_cond = {"c_concat":  [control], "c_crossattn": [prompt_uncond]}
+
+
+            # additional_inputs = self.decode_latents(latents).contiguous()
+        with torch.no_grad():
+            # additional_inputs = self.decode_latents(latents).contiguous()
+            x, _ = self.detector(self.resize_image(self.HWC_convert(additional_inputs), detect_resolution))
+            x = x[:, :, None]
+            x = np.concatenate([x, x, x], axis=2)
+
+            x = cv2.resize(x, (W * 8, H * 8), interpolation=cv2.INTER_LINEAR)
+
+            control = torch.from_numpy(x).float().cuda() / 255.0
+            control = torch.stack([control for _ in range(1)], dim=0)
+            control = control.permute(0, 3, 1, 2).contiguous()
+
+
         prompt = text_embeddings
         cond = {"c_concat": [control], "c_crossattn": [self.controlnet.get_learned_conditioning([prompt + ', ' + a_prompt] * 1)]}
         un_cond = {"c_concat":  [control], "c_crossattn": [self.controlnet.get_learned_conditioning([n_prompt] * 1)]}
@@ -201,24 +206,22 @@ class StableDiffusion(nn.Module):
         
         # convert to (0, 255)
 
-
         with torch.no_grad():
             noise = torch.randn_like(latents)
             latents_noisy = self.scheduler.add_noise(latents, noise, t)
             model_t = self.controlnet.apply_model(latents_noisy, t, cond)
             model_uncond = self.controlnet.apply_model(latents_noisy, t, un_cond)
+            # model_t = self.controlnet.model.diffusion_model(x=latents_noisy, timesteps=t, context=, control=)
+            # model_uncond = self.controlnet.model.diffustion_model(x=latents_noisy, timesteps=t, context=, control=)
             noise_pred = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
-            # print(noise_pred)
-            # print(noise)
-            # exit(0)
+
         # w(t), alpha_t * sigma_t^2
         # w = (1 - self.alphas[t])
         w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
         grad = w * (noise_pred - noise)
-
-        # clip grad for stable training?
+        # F.mse_loss(noise, noise_pred, reduction='none')
+        # clip grad for stable training
         # grad = grad.clamp(-1, 1)
-
         # manually backward, since we omitted an item in grad and cannot simply autodiff.
         # _t = time.time()
         latents.backward(gradient=grad, retain_graph=True)
@@ -297,6 +300,7 @@ class StableDiffusion(nn.Module):
         B, C, H, W = x.shape
         assert C == 1 or C == 3 or C == 4
         if C == 3:
+            x = x.permute(0, 2, 3, 1).squeeze().detach().cpu().numpy().astype(np.uint8)
             return x
         if C == 1:
             # return np.concatenate([x, x, x], axis=1)

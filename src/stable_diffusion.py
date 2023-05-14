@@ -1,6 +1,6 @@
 from huggingface_hub import hf_hub_download
 from torchvision import transforms
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel,logging,CLIPProcessor
+from transformers import CLIPModel, CLIPTextModel, CLIPTokenizer, CLIPVisionModel, logging, CLIPProcessor
 from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
 
 # suppress partial model loading warning
@@ -39,6 +39,8 @@ class StableDiffusion(nn.Module):
         # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
         self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
         self.text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        self.clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         self.image_encoder = None
         self.image_processor = None
 

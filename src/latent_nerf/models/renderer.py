@@ -22,6 +22,7 @@ class NeRFRenderer(nn.Module):
         self.latent_mode = latent_mode
         self.img_dims = 3+1 if self.latent_mode else 3
         self.max_steps = cfg.max_steps
+        self.train_step = 0
         if self.cuda_ray:
             logger.info('Loading CUDA ray marching module (compiling might take a while)...')
             from src.latent_nerf.raymarching import raymarchingrgb, raymarchinglatent
@@ -211,7 +212,7 @@ class NeRFRenderer(nn.Module):
         return results
 
 
-    def run_cuda(self, rays_o, rays_d, dt_gamma=0, light_d=None, ambient_ratio=1.0, shading='albedo', bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, T_thresh=1e-4, disable_background=False):
+    def run_cuda(self, rays_o, rays_d, dt_gamma=0, light_d=None, ambient_ratio=1.0, shading='albedo', bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, T_thresh=1e-4, disable_background=False, itertion=0):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # return: image: [B, N, 3], depth: [B, N]
         max_steps = self.max_steps
@@ -239,7 +240,7 @@ class NeRFRenderer(nn.Module):
             counter = self.step_counter[self.local_step % 16]
             counter.zero_() # set to 0
             self.local_step += 1
-
+            self.train_step += 1
             xyzs, dirs, deltas, rays = self.raymarching.march_rays_train(rays_o, rays_d, self.bound, self.density_bitfield, self.cascade, self.grid_size, nears, fars, counter, self.mean_count, perturb, 128, force_all_rays, dt_gamma, max_steps)
             
             sigmas, rgbs, normals = self(xyzs, dirs, light_d, ratio=ambient_ratio, shading=shading)

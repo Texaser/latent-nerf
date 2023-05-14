@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from src.latent_nerf.configs.render_config import RenderConfig
@@ -7,6 +8,27 @@ from .nerf_utils import trunc_exp, MLP, NeRFType, init_decoder_layer
 from .render_utils import safe_normalize
 from .renderer import NeRFRenderer
 
+class Encoder(nn.Module):
+    def __init__(self, h, w, d, c=128) -> None:
+        super().__init__()
+        self.plane1 = nn.Parameter(torch.randn(h, w, c) * 0.1)
+        self.plane2 = nn.Parameter(torch.randn(h, d, c) * 0.1)
+        self.plane3 = nn.Parameter(torch.randn(w, d, c) * 0.1)
+
+    def forward(self, x, down=2):
+        # x: [B, 3], \in [-1, 1]
+        plane1 = F.avg_pool2d(self.plane1, kernel_size=3, stride=2) 
+        plane2 = F.avg_pool2d(self.plane2) 
+        plane3 = F.avg_pool2d(self.plane3) 
+        y1 = F.grid_sample(self.plane1, x[..., [0,1]])  # [B, c]   
+        y2 = F.grid_sample(self.plane2, x[..., [0,2]])  # [B, c]   
+        y3 = F.grid_sample(self.plane3, x[..., [1,2]])  # [B, c]   
+        # y_down1 = F.grid_sample(plane1, x[..., [0,1]])  # [B, c]   
+        # y_down2 = F.grid_sample(plane2, x[..., [0,2]])  # [B, c]   
+        # y_down3 = F.grid_sample(plane3, x[..., [1,2]])  # [B, c]   
+        #+ y_down1 + y_down2 + y_down3 
+        y = y1 + y2 + y3 #concat
+        # return y, y_down  
 
 class NeRFNetwork(NeRFRenderer):
     def __init__(self,
@@ -21,9 +43,10 @@ class NeRFNetwork(NeRFRenderer):
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         # additional_dim_size = 1 if self.latent_mode else 0
-        additional_dim_size = 1
-        self.encoder, self.in_dim = get_encoder('tiledgrid', input_dim=3, desired_resolution=2048 * self.bound)
-
+        additional_dim_size = 1 if (self.latent_mode or cfg.nerf_type == NeRFType.latent_tune) else 0
+        # additional_dim_size = 1
+        # self.encoder, self.in_dim = get_encoder('tiledgrid', input_dim=3, desired_resolution=2048 * self.bound)
+        self.encoder, self.in_dim = get_encoder('triplane', input_dim=3, iteration=0)
         self.sigma_net = MLP(self.in_dim, 4 + additional_dim_size, hidden_dim, num_layers, bias=True)
 
         # background network
@@ -59,7 +82,9 @@ class NeRFNetwork(NeRFRenderer):
         # x: [N, 3], in [-bound, bound]
 
         # sigma
-        h = self.encoder(x, bound=self.bound)
+
+        # h = self.encoder(x, bound=self.bound)
+        h = self.encoder(x, iteration=self.train_step)
 
         h = self.sigma_net(h)
 
